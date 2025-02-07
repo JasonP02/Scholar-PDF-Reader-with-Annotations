@@ -130,3 +130,8 @@
 .pdf-highlight {
     opacity: 0.5;
 }
+
+#drawing-canvas {
+    pointer-events: none;
+    touch-action: none;
+}

@@ -4,6 +4,10 @@ let currentColor = 'yellow';
 let pdfUrl = '';
 let mouseX = 0;
 let mouseY = 0;
+let isDrawing = false;
+let currentPath = [];
+let drawingCanvas = null;
+let drawingCtx = null;
 document.addEventListener('mousemove', (e) => {
     mouseX = e.clientX;
     mouseY = e.clientY;
@@ -139,6 +143,7 @@ class ColorPickerManager {
 function initializeAnnotation() {
     console.log('Initializing annotation...');
     const colorPickerManager = new ColorPickerManager();
+    setupDrawingCanvas();
 
     // Set up message listener for PDF URL
     window.addEventListener("message", (event) => {
@@ -150,6 +155,7 @@ function initializeAnnotation() {
             }
             pdfUrl = receivedPdfUrl;
             console.log('PDF URL received:', pdfUrl);
+            restoreDrawings();
         }
     }, false);
 
@@ -165,6 +171,11 @@ function initializeAnnotation() {
     document.addEventListener('mouseup', () => handleSelection(colorPickerManager));
     document.addEventListener('click', (e) => handleErase(e, colorPickerManager));
 
+    // Add drawing event listeners
+    drawingCanvas.addEventListener('mousedown', (e) => startDrawing(e, colorPickerManager));
+    document.addEventListener('mousemove', (e) => draw(e, colorPickerManager));
+    document.addEventListener('mouseup', () => endDrawing(colorPickerManager));
+
     observePageChanges();
 }
 
@@ -178,7 +189,14 @@ function setupButtonHandlers(colorPickerManager) {
         colorPickerManager.updateButtonStates();
         colorPickerManager.updateCursor({ target: document.elementFromPoint(mouseX, mouseY) });
     });
-    document.getElementById(TOOLS.draw.id).addEventListener('click', alertNotImplemented);
+    document.getElementById(TOOLS.draw.id).addEventListener('click', () => {
+        colorPickerManager.activeTools.isDrawing = !colorPickerManager.activeTools.isDrawing;
+        colorPickerManager.activeTools.isHighlighting = false;
+        colorPickerManager.activeTools.isErasing = false;
+        drawingCanvas.style.pointerEvents = colorPickerManager.activeTools.isDrawing ? 'auto' : 'none';
+        colorPickerManager.updateButtonStates();
+        colorPickerManager.updateCursor({ target: document.elementFromPoint(mouseX, mouseY) });
+    });
     document.getElementById(TOOLS.text.id).addEventListener('click', alertNotImplemented);
 
     // Other buttons
@@ -199,7 +217,6 @@ function setupButtonHandlers(colorPickerManager) {
         chrome.tabs.create({ url: 'https://github.com/salcc/Scholar-PDF-Reader-with-Annotations' });
     });
 }
-
 
 function observePageChanges() {
     const observer = new MutationObserver((mutations) => {
@@ -340,7 +357,6 @@ function getExistingHighlights(node) {
     return highlights;
 }
 
-
 function handleOverlappingHighlights(node, startOffset, endOffset, groupId, existingHighlights, color) {
     const highlightedNodes = [];
     let currentOffset = 0;
@@ -459,28 +475,17 @@ function eraseAnnotation(groupId) {
 }
 
 function eraseAllAnnotations() {
-    if (confirm('Are you sure you want to erase all annotations from this PDF?')) {
-        chrome.storage.local.get([pdfUrl], function (result) {
-            if (chrome.runtime.lastError) {
-                console.error('Error loading annotations:', chrome.runtime.lastError);
-                return;
-            }
-
-            const savedAnnotations = result[pdfUrl] || [];
-            savedAnnotations.forEach(group => {
-                removeHighlightGroup(group);
-            });
-
-            chrome.storage.local.remove([pdfUrl], function () {
-                if (chrome.runtime.lastError) {
-                    console.error('Error removing annotations:', chrome.runtime.lastError);
-                } else {
-                    console.log('All annotations removed for ' + pdfUrl);
-                }
-            });
-        });
-    } else {
-        console.log('Erase all annotations cancelled');
+    if (confirm('Are you sure you want to erase all annotations and drawings?')) {
+        // Clear existing highlight annotations
+        const highlights = document.querySelectorAll('.highlight-span');
+        highlights.forEach(highlight => highlight.remove());
+        
+        // Clear drawings
+        drawingCtx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+        localStorage.removeItem(`drawings_${pdfUrl}`);
+        
+        // Clear stored annotations
+        localStorage.removeItem(`annotations_${pdfUrl}`);
     }
 }
 
@@ -493,7 +498,6 @@ function findNodeByXPath(xpath) {
         return null;
     }
 }
-
 
 function applyAnnotationsToPage(pageElement, highlightGroups) {
     const textContainer = pageElement.querySelector('.gsr-text-ctn');
@@ -523,7 +527,6 @@ function findNodeInPage(textContainer, xpath, text) {
     }
     return null;
 }
-
 
 function getXPath(node) {
     const parts = [];
@@ -585,6 +588,83 @@ function highlightNode(node, text, color, groupId) {
     }
 }
 
+function setupDrawingCanvas() {
+    drawingCanvas = document.createElement('canvas');
+    drawingCanvas.id = 'drawing-canvas';
+    drawingCanvas.style.position = 'absolute';
+    drawingCanvas.style.top = '0';
+    drawingCanvas.style.left = '0';
+    drawingCanvas.style.pointerEvents = 'none';
+    drawingCanvas.style.zIndex = '999';
+    
+    // Set canvas size to match viewport
+    const updateCanvasSize = () => {
+        drawingCanvas.width = window.innerWidth;
+        drawingCanvas.height = window.innerHeight;
+    };
+    updateCanvasSize();
+    window.addEventListener('resize', updateCanvasSize);
+
+    document.body.appendChild(drawingCanvas);
+    drawingCtx = drawingCanvas.getContext('2d');
+}
+
+function startDrawing(e, colorPickerManager) {
+    if (!colorPickerManager.activeTools.isDrawing) return;
+    isDrawing = true;
+    currentPath = [[e.clientX, e.clientY]];
+    drawingCtx.beginPath();
+    drawingCtx.moveTo(e.clientX, e.clientY);
+    drawingCtx.strokeStyle = colorPickerManager.currentColors.draw;
+    drawingCtx.lineWidth = 2;
+    drawingCtx.lineCap = 'round';
+    drawingCtx.lineJoin = 'round';
+}
+
+function draw(e, colorPickerManager) {
+    if (!isDrawing || !colorPickerManager.activeTools.isDrawing) return;
+    currentPath.push([e.clientX, e.clientY]);
+    drawingCtx.lineTo(e.clientX, e.clientY);
+    drawingCtx.stroke();
+}
+
+function endDrawing(colorPickerManager) {
+    if (!isDrawing || !colorPickerManager.activeTools.isDrawing) return;
+    isDrawing = false;
+    
+    // Save the drawing
+    if (currentPath.length > 1) {
+        const drawingData = {
+            path: currentPath,
+            color: colorPickerManager.currentColors.draw,
+            timestamp: Date.now()
+        };
+        
+        // Get existing drawings or initialize empty array
+        const drawings = JSON.parse(localStorage.getItem(`drawings_${pdfUrl}`) || '[]');
+        drawings.push(drawingData);
+        localStorage.setItem(`drawings_${pdfUrl}`, JSON.stringify(drawings));
+    }
+    currentPath = [];
+}
+
+function restoreDrawings() {
+    const drawings = JSON.parse(localStorage.getItem(`drawings_${pdfUrl}`) || '[]');
+    drawings.forEach(drawing => {
+        drawingCtx.beginPath();
+        drawingCtx.strokeStyle = drawing.color;
+        drawingCtx.lineWidth = 2;
+        drawingCtx.lineCap = 'round';
+        drawingCtx.lineJoin = 'round';
+        
+        const path = drawing.path;
+        drawingCtx.moveTo(path[0][0], path[0][1]);
+        path.forEach(point => {
+            drawingCtx.lineTo(point[0], point[1]);
+        });
+        drawingCtx.stroke();
+    });
+}
 
 // Initialize when the DOM is ready
 document.addEventListener('DOMContentLoaded', initializeAnnotation);
